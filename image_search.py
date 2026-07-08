@@ -15,6 +15,16 @@ PHASH_SIZE = 8
 PHASH_HIGHFREQ_FACTOR = 4
 COLOR_SIZE = 8
 DEFAULT_COLOR_THRESHOLD = 0.5
+LOCAL_FEATURE_NFEATURES = 2000
+LOCAL_FEATURE_RATIO_TEST = 0.75
+LOCAL_FEATURE_RANSAC_THRESHOLD = 5.0
+LOCAL_FEATURE_MIN_INLIERS = 80
+LOCAL_FEATURE_MIN_GOOD_MATCHES = 90
+LOCAL_FEATURE_MIN_INLIER_RATIO = 0.55
+RESIZED_PIXEL_MAX_DIMENSION = 320
+RESIZED_PIXEL_MAX_MEAN_ABS_DIFF = 45.0
+RESIZED_PIXEL_MAX_MEAN_RGB_DISTANCE = 6.0
+RESIZED_PIXEL_MIN_GRAY_CORRELATION = 0.45
 _IMAGEDUP_PHASH_ENCODER: Any | None = None
 _IMAGEDUP_IMPORT_FAILED = False
 
@@ -106,15 +116,21 @@ def search_image(
     if strict_matches:
         return strict_matches
 
-    if fallback_threshold < strict_threshold:
-        return []
+    if fallback_threshold >= strict_threshold:
+        fallback_matches = phash_matches(
+            items,
+            query_phash=query_phash,
+            query_color=query_color,
+            threshold=fallback_threshold,
+        )
+        if fallback_matches:
+            return fallback_matches
 
-    return phash_matches(
-        items,
-        query_phash=query_phash,
-        query_color=query_color,
-        threshold=fallback_threshold,
-    )
+    local_matches = local_feature_matches(query_path, items)
+    if local_matches:
+        return local_matches
+
+    return resized_pixel_matches(query_path, items)
 
 
 def iter_image_files(image_dir: Path) -> list[Path]:
@@ -213,6 +229,251 @@ def phash_matches(
     return sorted(matches, key=lambda result: (result["distance"], result["filename"]))
 
 
+def local_feature_matches(
+    query_image_path: str | Path,
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        import cv2
+    except ImportError:
+        return []
+
+    query_image = read_feature_image(query_image_path, cv2)
+    if query_image is None:
+        return []
+
+    detector = cv2.ORB_create(nfeatures=LOCAL_FEATURE_NFEATURES)
+    query_keypoints, query_descriptors = detector.detectAndCompute(query_image, None)
+    if query_descriptors is None or len(query_keypoints) < 4:
+        return []
+
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matches = []
+    for item in items:
+        image_path = Path(str(item.get("path", "")))
+        if not image_path.exists():
+            continue
+
+        try:
+            target_image = read_feature_image(image_path, cv2)
+            if target_image is None:
+                continue
+            score = local_feature_score(
+                cv2=cv2,
+                detector=detector,
+                matcher=matcher,
+                query_keypoints=query_keypoints,
+                query_descriptors=query_descriptors,
+                target_image=target_image,
+            )
+        except Exception:
+            continue
+
+        if is_local_feature_match(score):
+            matches.append(result_for_local_feature(item, score))
+
+    return sorted(
+        matches,
+        key=lambda result: (
+            -int(result["feature_inliers"]),
+            -float(result["feature_inlier_ratio"]),
+            -int(result["feature_good_matches"]),
+            result["filename"],
+        ),
+    )
+
+
+def resized_pixel_matches(
+    query_image_path: str | Path,
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        query_image = comparison_image(query_image_path)
+    except (OSError, UnidentifiedImageError, ValueError):
+        return []
+
+    query_pixels = np.asarray(query_image, dtype=np.float32)
+    query_gray = np.asarray(query_image.convert("L"), dtype=np.float32)
+    matches = []
+    for item in items:
+        image_path = Path(str(item.get("path", "")))
+        if not image_path.exists():
+            continue
+
+        try:
+            target_image = Image.open(image_path).convert("RGB").resize(
+                query_image.size,
+                Image.LANCZOS,
+            )
+        except (OSError, UnidentifiedImageError, ValueError):
+            continue
+
+        target_pixels = np.asarray(target_image, dtype=np.float32)
+        score = resized_pixel_score(query_pixels, query_gray, target_pixels)
+        if is_resized_pixel_match(score):
+            matches.append(result_for_resized_pixel(item, score))
+
+    return sorted(
+        matches,
+        key=lambda result: (
+            float(result["thumbnail_mean_abs_diff"]),
+            -float(result["thumbnail_gray_correlation"]),
+            float(result["thumbnail_mean_rgb_distance"]),
+            result["filename"],
+        ),
+    )
+
+
+def comparison_image(path: str | Path) -> Image.Image:
+    image = Image.open(path).convert("RGB")
+    width, height = image.size
+    max_dimension = max(width, height)
+    if max_dimension <= RESIZED_PIXEL_MAX_DIMENSION:
+        return image
+
+    scale = RESIZED_PIXEL_MAX_DIMENSION / max_dimension
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return image.resize(size, Image.LANCZOS)
+
+
+def resized_pixel_score(
+    query_pixels: np.ndarray,
+    query_gray: np.ndarray,
+    target_pixels: np.ndarray,
+) -> dict[str, float]:
+    diff = np.abs(query_pixels - target_pixels)
+    query_mean_rgb = query_pixels.reshape(-1, 3).mean(axis=0)
+    target_mean_rgb = target_pixels.reshape(-1, 3).mean(axis=0)
+    target_gray = np.asarray(
+        Image.fromarray(np.clip(target_pixels, 0, 255).astype(np.uint8)).convert("L"),
+        dtype=np.float32,
+    )
+
+    return {
+        "mean_abs_diff": float(diff.mean()),
+        "mean_rgb_distance": float(np.abs(query_mean_rgb - target_mean_rgb).mean()),
+        "gray_correlation": gray_correlation(query_gray, target_gray),
+    }
+
+
+def gray_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    left_centered = left - left.mean()
+    right_centered = right - right.mean()
+    denominator = float(np.linalg.norm(left_centered) * np.linalg.norm(right_centered))
+    if denominator == 0:
+        return 0.0
+    return float((left_centered * right_centered).sum() / denominator)
+
+
+def is_resized_pixel_match(score: dict[str, float]) -> bool:
+    return (
+        score["mean_abs_diff"] <= RESIZED_PIXEL_MAX_MEAN_ABS_DIFF
+        and score["mean_rgb_distance"] <= RESIZED_PIXEL_MAX_MEAN_RGB_DISTANCE
+        and score["gray_correlation"] >= RESIZED_PIXEL_MIN_GRAY_CORRELATION
+    )
+
+
+def result_for_resized_pixel(item: dict[str, Any], score: dict[str, float]) -> dict[str, Any]:
+    mean_abs_diff = score["mean_abs_diff"]
+    return {
+        "filename": item["filename"],
+        "path": item["path"],
+        "relative_path": item["relative_path"],
+        "match_type": "resized_pixel",
+        "distance": None,
+        "color_distance": None,
+        "similarity": round(max(0.0, (1 - mean_abs_diff / 255) * 100), 2),
+        "thumbnail_mean_abs_diff": round(mean_abs_diff, 3),
+        "thumbnail_mean_rgb_distance": round(score["mean_rgb_distance"], 3),
+        "thumbnail_gray_correlation": round(score["gray_correlation"], 3),
+        "modified_at": item.get("modified_at", ""),
+        "size_bytes": item.get("size_bytes", 0),
+    }
+
+def read_feature_image(path: str | Path, cv2: Any) -> np.ndarray | None:
+    try:
+        data = np.fromfile(str(Path(path)), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+
+
+def local_feature_score(
+    cv2: Any,
+    detector: Any,
+    matcher: Any,
+    query_keypoints: list[Any],
+    query_descriptors: np.ndarray,
+    target_image: np.ndarray,
+) -> dict[str, float | int]:
+    target_keypoints, target_descriptors = detector.detectAndCompute(target_image, None)
+    if target_descriptors is None or len(target_keypoints) < 4:
+        return {"good_matches": 0, "inliers": 0, "inlier_ratio": 0.0}
+
+    knn_matches = matcher.knnMatch(query_descriptors, target_descriptors, k=2)
+    good_matches = []
+    for pair in knn_matches:
+        if len(pair) != 2:
+            continue
+        match, neighbor = pair
+        if match.distance < LOCAL_FEATURE_RATIO_TEST * neighbor.distance:
+            good_matches.append(match)
+
+    inliers = 0
+    if len(good_matches) >= 4:
+        query_points = np.float32(
+            [query_keypoints[match.queryIdx].pt for match in good_matches]
+        ).reshape(-1, 1, 2)
+        target_points = np.float32(
+            [target_keypoints[match.trainIdx].pt for match in good_matches]
+        ).reshape(-1, 1, 2)
+        _, mask = cv2.findHomography(
+            query_points,
+            target_points,
+            cv2.RANSAC,
+            LOCAL_FEATURE_RANSAC_THRESHOLD,
+        )
+        if mask is not None:
+            inliers = int(mask.ravel().sum())
+
+    return {
+        "good_matches": len(good_matches),
+        "inliers": inliers,
+        "inlier_ratio": inliers / max(len(good_matches), 1),
+    }
+
+
+def is_local_feature_match(score: dict[str, float | int]) -> bool:
+    return (
+        int(score["inliers"]) >= LOCAL_FEATURE_MIN_INLIERS
+        and int(score["good_matches"]) >= LOCAL_FEATURE_MIN_GOOD_MATCHES
+        and float(score["inlier_ratio"]) >= LOCAL_FEATURE_MIN_INLIER_RATIO
+    )
+
+
+def result_for_local_feature(
+    item: dict[str, Any],
+    score: dict[str, float | int],
+) -> dict[str, Any]:
+    inlier_ratio = float(score["inlier_ratio"])
+    return {
+        "filename": item["filename"],
+        "path": item["path"],
+        "relative_path": item["relative_path"],
+        "match_type": "local_feature",
+        "distance": None,
+        "color_distance": None,
+        "similarity": round(inlier_ratio * 100, 2),
+        "feature_inliers": int(score["inliers"]),
+        "feature_good_matches": int(score["good_matches"]),
+        "feature_inlier_ratio": round(inlier_ratio, 3),
+        "modified_at": item.get("modified_at", ""),
+        "size_bytes": item.get("size_bytes", 0),
+    }
+
+
 def result_for_item(
     item: dict[str, Any],
     match_type: str,
@@ -290,3 +551,4 @@ def empty_index() -> dict[str, Any]:
         "hash_algorithm": phash_backend_name(),
         "items": [],
     }
+

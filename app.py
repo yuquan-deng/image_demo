@@ -584,19 +584,42 @@ def index_table_rows(index: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def result_detail_items(result: dict[str, Any]) -> list[tuple[str, str]]:
+    match_type = str(result.get("match_type", ""))
+    if match_type == "local_feature":
+        return [
+            ("\u5339\u914d\u65b9\u5f0f", match_type_label(match_type)),
+            ("\u5c40\u90e8\u5339\u914d\u7f6e\u4fe1\u5ea6", f"{result.get('similarity', 0)}%"),
+            ("ORB \u51e0\u4f55\u5185\u70b9", str(result.get("feature_inliers", "-"))),
+            ("ORB \u6709\u6548\u5339\u914d\u70b9", str(result.get("feature_good_matches", "-"))),
+            ("ORB \u5185\u70b9\u6bd4\u4f8b", str(result.get("feature_inlier_ratio", "-"))),
+            ("\u6587\u4ef6\u5927\u5c0f", format_file_size(result.get("size_bytes", 0))),
+        ]
+
+    if match_type == "resized_pixel":
+        return [
+            ("\u5339\u914d\u65b9\u5f0f", match_type_label(match_type)),
+            ("\u7f29\u7565\u76f8\u4f3c\u5ea6", f"{result.get('similarity', 0)}%"),
+            ("\u7f29\u7565\u50cf\u7d20\u5747\u5dee", str(result.get("thumbnail_mean_abs_diff", "-"))),
+            ("\u7f29\u7565\u989c\u8272\u5747\u5dee", str(result.get("thumbnail_mean_rgb_distance", "-"))),
+            ("\u7070\u5ea6\u7ed3\u6784\u76f8\u5173", str(result.get("thumbnail_gray_correlation", "-"))),
+            ("\u6587\u4ef6\u5927\u5c0f", format_file_size(result.get("size_bytes", 0))),
+        ]
+
     return [
-        ("匹配方式", match_type_label(str(result.get("match_type", "")))),
-        ("相似度", f"{result.get('similarity', 0)}%"),
-        ("PHash 距离", str(result.get("distance", "-"))),
-        ("颜色距离", str(result.get("color_distance", "-"))),
-        ("文件大小", format_file_size(result.get("size_bytes", 0))),
+        ("\u5339\u914d\u65b9\u5f0f", match_type_label(match_type)),
+        ("\u76f8\u4f3c\u5ea6", f"{result.get('similarity', 0)}%"),
+        ("PHash \u8ddd\u79bb", str(result.get("distance", "-"))),
+        ("\u989c\u8272\u8ddd\u79bb", str(result.get("color_distance", "-"))),
+        ("\u6587\u4ef6\u5927\u5c0f", format_file_size(result.get("size_bytes", 0))),
     ]
 
 
 def match_type_label(match_type: str) -> str:
     labels = {
-        "sha256": "完全一致",
-        "phash": "视觉相似",
+        "sha256": "\u5b8c\u5168\u4e00\u81f4",
+        "phash": "\u89c6\u89c9\u76f8\u4f3c",
+        "local_feature": "\u5c40\u90e8\u7279\u5f81\u5339\u914d",
+        "resized_pixel": "\u7f29\u7565\u56fe\u515c\u5e95\u5339\u914d",
     }
     return labels.get(match_type, match_type)
 
