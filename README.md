@@ -4,6 +4,24 @@
 
 项目定位是轻量级本地原型，不依赖数据库、向量库或独立后端服务。核心能力集中在传统图像相似度算法与 Streamlit 页面交互上，适合验证本地图片去重、相似图召回、低成本商品图/素材图检索等场景。
 
+## 界面预览
+
+<p align="center">
+  <img src="docs/images/screenshot-index.png" width="880" alt="配置中心与索引概览">
+</p>
+
+<p align="center">
+  <sub><b>配置中心与索引概览</b>：侧边栏设置本地图片集目录、索引文件路径和 PHash 匹配阈值，主区域展示图片数量、索引状态和哈希方式（示例索引 286 张图片，哈希方式 <code>local-phash</code>）。</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/screenshot-search.png" width="880" alt="单图检索与匹配结果">
+</p>
+
+<p align="center">
+  <sub><b>单图检索与匹配结果</b>：上传一张查询图片（示例为内存条照片），系统从本地图片集中命中视觉相同或高度相似的图片，结果卡片给出匹配文件名与相对路径。</sub>
+</p>
+
 ## 技术栈总览
 
 | 层级 | 技术 | 用途 |
@@ -26,6 +44,8 @@ D:\image_demo1
 ├── image_search.py                # 图片索引、哈希、检索和相似度算法
 ├── requirements.txt               # Python 依赖
 ├── README.md                      # 项目说明
+├── docs
+│   └── images                     # README 界面预览配图
 ├── data
 │   ├── images                     # 本地图片集
 │   └── index.json                 # 构建后的图片索引
@@ -55,23 +75,48 @@ opencv-python-headless>=4.8
 
 ## 运行
 
+### macOS / Linux（当前环境）
+
+在项目根目录执行：
+
+```bash
+# 1. 创建虚拟环境（Python 3.11，streamlit 1.28.1 对 3.11 兼容性最好）
+python3.11 -m venv .venv
+
+# 2. 安装依赖（imagededup 会拉入 torch/约 2GB，可选，见下方说明）
+.venv/bin/python -m pip install \
+  "streamlit==1.28.1" "Pillow>=10.0.0" "numpy>=1.24.0" \
+  "opencv-python-headless>=4.8" "pytest>=7.0.0"
+
+# 3. 启动页面
+.venv/bin/python -m streamlit run app.py
+```
+
+浏览器打开 <http://localhost:8501>，先点侧边栏「构建 / 刷新索引」，再上传查询图检索。
+
+不装 `imagededup` 时，`image_search.py` 会自动回退到内置 DCT PHash，
+索引里 `hash_algorithm` 显示为 `local-phash`，功能完整，只是哈希值与
+`imagededup-phash` 不一致（换回 imagededup 后需要重建索引）。
+需要 imagededup 时执行 `.venv/bin/python -m pip install imagededup==0.3.3.post2`。
+
+### Windows（原始环境）
+
 ```powershell
+python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-默认图片集目录：
+默认图片集目录：`data\images`，默认索引文件：`data\index.json`。
 
-```text
-D:\image_demo1\data\images
+### 首次启动注意
+
+`data/index.json` 里记录的是**绝对路径**。跨机器或移动项目目录后，
+索引会全部失效（页面会显示旧的图片数量和路径），必须重新点一次
+「构建 / 刷新索引」，或执行：
+
+```bash
+.venv/bin/python -c "from image_search import build_index, save_index; save_index(build_index('data/images'), 'data/index.json')"
 ```
-
-默认索引文件：
-
-```text
-D:\image_demo1\data\index.json
-```
-
-打开页面后，先点击侧边栏里的“构建 / 刷新索引”，再上传查询图片进行检索。
 
 ## 架构分层
 
